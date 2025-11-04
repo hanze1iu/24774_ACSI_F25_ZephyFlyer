@@ -145,3 +145,86 @@ Launch MuJoCo's built-in viewer to inspect the model without running control scr
 - Debug output includes position, velocity, and all control deltas
 - The model is cross-platform: works on Windows, Linux, macOS
 - WSL2 users need X Server (VcXsrv) for graphics; native Windows recommended for best experience
+
+### Webots Environment (Alternative Simulation)
+
+The project now includes access to the official Bitcraze Webots simulation through the `crazyflie-simulation` repository (cloned locally, not tracked in git).
+
+**Location**: `/crazyflie-simulation/` (gitignored external repository)
+
+#### Key Files
+- **World files**: `simulator_files/webots/worlds/`
+  - `crazyflie_world.wbt` - Basic keyboard control
+  - `crazyflie_apartement.wbt` - Indoor environment with wall following
+- **Controllers**: `simulator_files/webots/controllers/`
+  - `crazyflie_controller_py/` - Python keyboard controller
+  - `crazyflie_controller_py_firmware_pid/` - Firmware-based PID
+  - `crazyflie_controller_py_wallfollowing/` - Wall following demo
+- **Shared PID controller**: `controllers_shared/python_based/pid_controller.py`
+
+#### Installation and Setup
+
+**See [WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md) for 5-minute setup guide.**
+
+**Installation requirements**:
+1. Webots R2023b or newer (Windows recommended for WSL2 users)
+2. Download from https://cyberbotics.com/
+3. No additional Python dependencies needed for basic keyboard control
+4. cflib already installed in project venv for advanced features
+
+**Running Webots**:
+```bash
+# On Windows, open Webots GUI and load:
+# File → Open World... → Navigate to:
+\\wsl.localhost\Ubuntu\home\hanzel\24774_project\24774_ACSI_F25_ZephyFlyer\crazyflie-simulation\simulator_files\webots\worlds\crazyflie_world.wbt
+```
+
+**Keyboard controls in Webots**:
+- Arrow keys: Forward/backward/left/right
+- W/S: Up/down (altitude)
+- Q/E: Yaw left/right
+- A: Toggle wall following (in apartment world)
+
+#### Webots vs MuJoCo
+
+**Use Webots for**:
+- Quick prototyping and demos
+- Visual debugging in complex environments
+- Testing with official Bitcraze parameters
+- Reference implementation comparison
+
+**Use MuJoCo for**:
+- High-precision control algorithm development
+- Parameter tuning and optimization
+- Research-grade simulation accuracy
+- Custom dynamics modeling
+
+#### Important: Official PID Parameters
+
+The Webots controller uses official Bitcraze PID gains that differ significantly from our MuJoCo implementation:
+
+```python
+# Webots (official Bitcraze parameters)
+gains = {
+    "kp_att_rp": 0.5,    # Roll/pitch attitude
+    "kd_att_rp": 0.1,
+    "kp_att_y": 1.0,     # Yaw attitude
+    "kd_att_y": 0.5,
+    "kp_vel_xy": 2.0,    # XY velocity
+    "kd_vel_xy": 0.5,
+    "kp_z": 10.0,        # Altitude
+    "ki_z": 5.0,
+    "kd_z": 5.0
+}
+```
+
+**Key differences from MuJoCo implementation**:
+- Attitude control gains are **25x higher** (0.5 vs 0.02)
+- This may explain MuJoCo PID instability issues
+- Consider adjusting MuJoCo inner loop gains based on these values
+
+#### Documentation
+
+- **[PROJECT_STATUS.md](PROJECT_STATUS.md)** - Current development status and technical analysis
+- **[WEBOTS_SETUP.md](WEBOTS_SETUP.md)** - Complete Webots installation guide
+- **[WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md)** - Quick start guide

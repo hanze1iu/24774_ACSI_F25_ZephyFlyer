@@ -3,7 +3,32 @@ Repo for robust control project based on CrazyFlie 2.1+ drone and disturbance.
 
 ## 🧠 Simulation
 
-This repository now includes a MuJoCo simulation environment for the Crazyflie 2.1 drone.
+This repository includes **two simulation environments** for the Crazyflie 2.1 drone:
+
+1. **MuJoCo** - High-precision physics simulation for control algorithm development
+2. **Webots** - Official Bitcraze simulation for rapid prototyping and testing
+
+### 📊 Simulation Comparison
+
+| Feature | MuJoCo | Webots |
+|---------|--------|--------|
+| **Physics Accuracy** | High | Medium |
+| **Official Support** | General physics engine | CrazyFlie official |
+| **Maintenance** | Active (DeepMind) | Limited (archived) |
+| **Best For** | Control algorithm R&D | Quick demos, testing |
+| **Documentation** | See below | [WEBOTS_SETUP.md](WEBOTS_SETUP.md) |
+
+### 📖 Documentation
+
+- **[PROJECT_STATUS.md](PROJECT_STATUS.md)** - Current development status, MuJoCo PID issues, technical analysis
+- **[WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md)** - 5-minute Webots setup and testing guide
+- **[WEBOTS_SETUP.md](WEBOTS_SETUP.md)** - Complete Webots installation and configuration
+
+---
+
+## MuJoCo Simulation
+
+High-precision physics simulation for control algorithm development.
 
 ### Setup
 ```bash
@@ -72,3 +97,57 @@ python simulation/cascade_pid_improved.py
 - **Enhanced diagnostics**: Detailed PID term logging and reset counter
 
 Use this version if the basic PID becomes unstable after extended runtime.
+
+---
+
+## Webots Simulation
+
+Official Bitcraze simulation environment for rapid prototyping and visualization.
+
+### Quick Start (5 minutes)
+
+**See [WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md) for detailed instructions.**
+
+1. **Download Webots**: Visit https://cyberbotics.com/ and download Windows version
+2. **Install**: Run installer with default options
+3. **Open World**: `File` → `Open World...` → Navigate to:
+   ```
+   \\wsl.localhost\Ubuntu\home\hanzel\24774_project\24774_ACSI_F25_ZephyFlyer\crazyflie-simulation\simulator_files\webots\worlds\crazyflie_world.wbt
+   ```
+4. **Run**: Click ▶️ Play button
+5. **Control**: Click 3D window, use arrow keys to fly
+
+### Available Worlds
+
+The `crazyflie-simulation/` repository (cloned locally, not tracked in git) contains:
+
+- **`crazyflie_world.wbt`** - Basic keyboard control in open environment
+- **`crazyflie_apartement.wbt`** - Indoor scene with wall-following capability
+
+### Key Finding: PID Parameters
+
+Webots uses **official Bitcraze PID parameters** that differ significantly from our MuJoCo implementation:
+
+```python
+# Webots (official)         # MuJoCo (ours)
+kp_att_rp: 0.5               kp_att_rp: 0.02  # 25x difference!
+kd_att_rp: 0.1               kd_att_rp: 0.004 # 25x difference!
+```
+
+**This parameter analysis may help resolve MuJoCo PID instability issues.**
+
+### Documentation
+
+- **[WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md)** - Quick start guide
+- **[WEBOTS_SETUP.md](WEBOTS_SETUP.md)** - Complete setup, comparison, troubleshooting
+- **Controller source**: `crazyflie-simulation/controllers_shared/python_based/pid_controller.py`
+
+---
+
+## Project Status
+
+See **[PROJECT_STATUS.md](PROJECT_STATUS.md)** for:
+- Current MuJoCo PID controller development status
+- Known stability issues and debugging strategies
+- Technical architecture and parameter documentation
+- Comparison with Webots parameters
