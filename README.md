@@ -98,6 +98,21 @@ python simulation/cascade_pid_improved.py
 
 Use this version if the basic PID becomes unstable after extended runtime.
 
+#### 6. Tuned Cascade PID (Optimized for Faster Convergence)
+Run the tuned version optimized for faster response and convergence:
+```bash
+python simulation/cascade_pid_tuned.py
+```
+
+**Key improvements over improved cascade PID:**
+- **Relaxed conditional integration**: Increased error threshold from 0.5m to 3.0m to avoid deadlock
+- **Increased integral gains**: Faster steady-state error elimination
+- **Optimized proportional gains**: Reduced overshoot while maintaining responsiveness
+- **Enhanced derivative gains**: Better damping and stability
+- **More aggressive tuning**: Faster convergence to target position
+
+This version resolves issues where the improved PID gets stuck due to overly conservative integration conditions.
+
 ---
 
 ## Webots Simulation
@@ -119,10 +134,46 @@ Official Bitcraze simulation environment for rapid prototyping and visualization
 
 ### Available Worlds
 
-The `crazyflie-simulation/` repository (cloned locally, not tracked in git) contains:
+The `crazyflie-simulation/simulator_files/webots/worlds/` directory contains:
 
+**Basic Demos:**
 - **`crazyflie_world.wbt`** - Basic keyboard control in open environment
 - **`crazyflie_apartement.wbt`** - Indoor scene with wall-following capability
+
+**Advanced Control Demos:**
+- **`crazyflie_simple_pid.wbt`** - Simple PID controller demonstration
+- **`crazyflie_simple_pid_fixed.wbt`** - Fixed/improved version of simple PID
+- **`crazyflie_trajectory.wbt`** - **Enhanced trajectory controller with XY position outer loop (PD+I)**
+  - Features: Low-pass velocity filtering + Integral term for constant wind rejection
+  - Supervisor-based external force application for disturbance testing
+  - Real-time tunable parameters: Kp_xy=0.6, Kd_xy=0.3, Ki_xy=0.05
+- **`crazyflie_disturbance.wbt`** - Disturbance rejection testing environment
+
+### Enhanced Trajectory Controller (Wind/Disturbance Rejection)
+
+The **`crazyflie_trajectory.wbt`** world now includes an **enhanced XY position outer loop** designed for robust position control under external disturbances (wind, impulse forces).
+
+**Controller Architecture:**
+```
+Position Error → [PD+I Outer Loop] → Velocity Command → [Official Bitcraze Inner Loop] → Motor Commands
+```
+
+**Key Features:**
+- **PD+I Control**: Proportional + Derivative (on filtered velocity) + Integral (for constant wind)
+- **Low-pass Velocity Filter**: Reduces noise amplification (tau_v = 0.1s)
+- **Anti-windup**: Simple back-calculation to prevent integral saturation
+- **Tunable Parameters**:
+  - `Kp_xy = 0.6` - Position gain (1/s)
+  - `Kd_xy = 0.3` - Velocity damping
+  - `Ki_xy = 0.05` - Integral gain for steady-state error elimination under constant wind
+  - `v_xy_max = 0.3 m/s` - Maximum velocity command
+
+**Testing Disturbances:**
+- **Impulse forces**: Single push (F/G/H/J keys for X/Y directions)
+- **Continuous wind**: Constant force applied every timestep (7/8/9/0 keys + V to enable)
+- Press `P` to view outer loop status (integrals, filtered velocity)
+
+**Use Case**: Test position hold performance under wind gusts and constant wind conditions.
 
 ### Key Finding: PID Parameters
 

@@ -132,6 +132,17 @@ Interactive manual control with keyboard inputs:
 
 Controls are incremental with automatic damping for smooth flight behavior.
 
+**Cascade PID controllers:**
+```bash
+python simulation/cascade_pid_control.py      # Basic cascade PID
+python simulation/cascade_pid_improved.py     # Enhanced stability version
+python simulation/cascade_pid_tuned.py        # Optimized for faster convergence
+```
+Three versions of cascade PID controller with progressive improvements:
+- **Basic**: Two-layer control with motor mixing and anti-windup
+- **Improved**: Additional stability features (conditional integration, tilt limiting, derivative filtering)
+- **Tuned**: Relaxed integration conditions (3.0m threshold) and optimized gains for faster response
+
 **Viewer-only mode (no control):**
 ```bash
 python -m mujoco.viewer --mjcf simulation/crazyflie_sim/scene.xml
@@ -153,14 +164,33 @@ The project now includes access to the official Bitcraze Webots simulation throu
 **Location**: `/crazyflie-simulation/` (gitignored external repository)
 
 #### Key Files
-- **World files**: `simulator_files/webots/worlds/`
-  - `crazyflie_world.wbt` - Basic keyboard control
-  - `crazyflie_apartement.wbt` - Indoor environment with wall following
-- **Controllers**: `simulator_files/webots/controllers/`
-  - `crazyflie_controller_py/` - Python keyboard controller
-  - `crazyflie_controller_py_firmware_pid/` - Firmware-based PID
-  - `crazyflie_controller_py_wallfollowing/` - Wall following demo
-- **Shared PID controller**: `controllers_shared/python_based/pid_controller.py`
+
+**World files**: `crazyflie-simulation/simulator_files/webots/worlds/`
+
+Basic Demos:
+- `crazyflie_world.wbt` - Basic keyboard control in open environment
+- `crazyflie_apartement.wbt` - Indoor environment with wall following
+
+Advanced Control Demos:
+- `crazyflie_simple_pid.wbt` - Simple PID controller demonstration
+- `crazyflie_simple_pid_fixed.wbt` - Fixed/improved version of simple PID
+- `crazyflie_trajectory.wbt` - **Enhanced trajectory controller with XY position outer loop (PD+I)**
+  - Features: Low-pass velocity filtering, integral for wind rejection, anti-windup
+  - Parameters: Kp_xy=0.6, Kd_xy=0.3, Ki_xy=0.05, v_xy_max=0.3 m/s, tau_v=0.1s
+  - Disturbance testing: Impulse forces and continuous wind simulation
+- `crazyflie_disturbance.wbt` - Disturbance rejection testing environment
+
+**Controllers**: `crazyflie-simulation/simulator_files/webots/controllers/`
+- `crazyflie_controller_py/` - Python keyboard controller
+- `crazyflie_controller_py_firmware_pid/` - Firmware-based PID
+- `crazyflie_controller_py_wallfollowing/` - Wall following demo
+- `crazyflie_simple_pid/` - Simple PID implementation
+- `crazyflie_trajectory/` - **Enhanced trajectory controller with XY outer loop (PD+I)**
+  - Outer loop: Position error → Velocity command (with integral for constant wind)
+  - Inner loop: Official Bitcraze velocity controller (unchanged)
+  - Press 'P' to view outer loop status (integrals, filtered velocity)
+
+**Shared PID controller**: `crazyflie-simulation/controllers_shared/python_based/pid_controller.py`
 
 #### Installation and Setup
 
