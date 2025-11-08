@@ -189,8 +189,22 @@ Advanced Control Demos:
   - Outer loop: Position error → Velocity command (with integral for constant wind)
   - Inner loop: Official Bitcraze velocity controller (unchanged)
   - Press 'P' to view outer loop status (integrals, filtered velocity)
+- `crazyflie_fixed_position/` - **NEW: Fixed Position Controller (XYZ Position Hold)**
+  - Full cascade controller with position outer loop
+  - Maintains fixed XYZ position under disturbances
+  - Features: Impulse force testing, continuous wind rejection
+  - Aggressive tuning: Kp=3.0, max velocity=1.0 m/s
+  - Coordinate frame transformation (world → body frame)
+  - Return time: ~1-2 seconds for 1m displacement
 
 **Shared PID controller**: `crazyflie-simulation/controllers_shared/python_based/pid_controller.py`
+- `pid_velocity_fixed_height_controller()` - Velocity control with fixed altitude
+- `pid_fixed_position_controller()` - **NEW: Position control with fixed XYZ** (added 2025-11-06)
+  - Outer loop: Position error (world frame) → Velocity command (body frame)
+  - Includes coordinate transformation using yaw angle
+  - PD+I control with anti-windup
+  - Aggressive tuning for fast response (Kp=3.0, Kd=0.15, Ki=0.2)
+  - Max velocity: 1.0 m/s
 
 #### Installation and Setup
 
@@ -258,3 +272,110 @@ gains = {
 - **[PROJECT_STATUS.md](PROJECT_STATUS.md)** - Current development status and technical analysis
 - **[WEBOTS_SETUP.md](WEBOTS_SETUP.md)** - Complete Webots installation guide
 - **[WEBOTS_QUICKSTART.md](WEBOTS_QUICKSTART.md)** - Quick start guide
+
+---
+
+## New Feature: Fixed Position Controller (2025-11-06)
+
+### Overview
+
+A new cascade PID controller `pid_fixed_position_controller` has been implemented to maintain **fixed XYZ position** under external disturbances (impulse forces and continuous wind).
+
+### Key Features
+
+1. **Position Outer Loop**
+   - Converts position errors (world frame) to velocity commands (body frame)
+   - PD+I control with anti-windup
+   - Coordinate transformation: world frame → body frame using yaw angle
+
+2. **Aggressive Tuning for Fast Response**
+   ```python
+   Kp_pos_xy: 3.0     # Very high proportional gain
+   Kd_pos_xy: 0.15    # Low damping for fast response
+   Ki_pos_xy: 0.2     # Strong integral for wind rejection
+   max_velocity: 1.0 m/s  # High speed limit
+   ```
+
+3. **Performance**
+   - Return time: ~1-2 seconds (for 1m displacement)
+   - Wind rejection: Strong integral action
+   - Overshoot: 10-20% (acceptable for speed)
+
+### Files
+
+**Controller Class**: `crazyflie-simulation/controllers_shared/python_based/pid_controller.py:86-260`
+- Class: `pid_fixed_position_controller()`
+- API: Takes desired position (x, y, z) and yaw, outputs motor commands
+- Coordinate transformation included
+
+**Test Controller**: `crazyflie-simulation/simulator_files/webots/controllers/crazyflie_fixed_position/`
+- `crazyflie_fixed_position.py` - Main controller script
+- `README.md` - Usage instructions
+
+**Documentation**:
+- `BUGFIX_COORDINATE_FRAME.md` - Explanation of coordinate transformation fix
+- `TUNING_AGGRESSIVE.md` - First tuning iteration
+- `TUNING_VERY_AGGRESSIVE.md` - Final aggressive tuning
+
+### Usage
+
+**In Webots**:
+1. Open any world with CrazyFlie
+2. Set controller field to: `crazyflie_fixed_position`
+3. Run simulation
+4. Drone hovers at (0, 0, 1.0) by default
+
+**Keyboard Controls**:
+- **Arrow Keys**: Adjust target XY position (±0.5m)
+- **W/S**: Adjust target altitude (±0.2m)
+- **R**: Reset target to origin
+- **F/G/H/J**: Apply impulse forces (horizontal)
+- **U/D**: Apply impulse forces (vertical)
+- **7/8/9/0**: Set wind direction
+- **V**: Toggle wind ON/OFF
+- **SPACE**: Print status
+
+### Technical Highlights
+
+#### Coordinate Frame Transformation
+
+**Problem**: Original implementation calculated position errors in world frame but passed them directly to velocity controller expecting body frame commands.
+
+**Solution**: Transform world frame errors to body frame using yaw angle:
+```python
+# World frame error
+x_error_world = target_x - actual_x
+y_error_world = target_y - actual_y
+
+# Transform to body frame
+x_error_body = x_error_world * cos(yaw) + y_error_world * sin(yaw)
+y_error_body = -x_error_world * sin(yaw) + y_error_world * cos(yaw)
+
+# PID control in body frame
+v_cmd = Kp * error_body - Kd * actual_velocity + Ki * integral
+```
+
+#### Tuning Evolution
+
+| Version | Kp | max_velocity | Return Time | Status |
+|---------|-----|-------------|-------------|--------|
+| v1 (Conservative) | 0.6 | 0.3 m/s | ~15s | Too slow |
+| v2 (Aggressive) | 1.5 | 0.6 m/s | ~6s | Still slow |
+| v3 (Very Aggressive) | 3.0 | 1.0 m/s | ~1-2s | ✅ Current |
+
+### Comparison with Trajectory Controller
+
+| Feature | `crazyflie_trajectory` | `crazyflie_fixed_position` |
+|---------|----------------------|---------------------------|
+| **Position Control** | In main script | In controller class ✅ |
+| **Reusability** | Script-specific | Fully reusable ✅ |
+| **Tuning** | Mixed in code | Centralized ✅ |
+| **Coordinate Transform** | In main loop | In controller ✅ |
+| **API** | Velocity commands | Position commands ✅ |
+
+### Future Work
+
+- Add velocity filtering (low-pass filter) for smoother response
+- Implement yaw position control (not just yaw rate)
+- Add trajectory tracking with feedforward
+- Test on real hardware
