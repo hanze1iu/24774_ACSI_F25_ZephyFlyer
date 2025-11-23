@@ -5,6 +5,7 @@ __pycache__/
 
 # Virtual environment
 .venv/
+.venv_sim/
 
 # Crazyflie cache files
 cache/
@@ -14,3 +15,6 @@ cache/
 # VS Code
 .vscode/
 MUJOCO_LOG.TXT
+
+# Large binary files
+*.deb

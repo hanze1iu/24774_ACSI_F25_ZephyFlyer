@@ -1,0 +1,30 @@
+#VRML_SIM R2023a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "../protos/Crazyflie.proto"
+
+WorldInfo {
+  basicTimeStep 10
+  info [
+    "TinyMPC Hover Demo - CrazyFlie at 0.5m"
+    "Control rate: 100Hz"
+  ]
+}
+Viewpoint {
+  orientation -0.2 0.9 0.4 0.8
+  position -1.0 -0.5 0.8
+  follow "Crazyflie"
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Floor {
+  size 10 10
+}
+Crazyflie {
+  translation 0 0 0.015
+  controller "crazyflie_tinympc"
+}

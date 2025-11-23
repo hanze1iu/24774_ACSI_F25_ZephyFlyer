@@ -31,7 +31,8 @@
       "Bash(snap --version:*)",
       "Bash(sudo snap install:*)",
       "Bash(wslpath:*)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": [],
     "ask": []

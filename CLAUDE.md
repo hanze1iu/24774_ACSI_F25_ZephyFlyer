@@ -275,6 +275,93 @@ gains = {
 
 ---
 
+## TinyMPC Hover Controller (2025-11-23)
+
+### Overview
+
+A Model Predictive Control (MPC) controller using TinyMPC for CrazyFlie hover stabilization.
+
+### Files
+
+- **Controller**: `crazyflie-simulation/simulator_files/webots/controllers/crazyflie_tinympc/crazyflie_tinympc.py`
+- **World file**: `crazyflie-simulation/simulator_files/webots/worlds/crazyflie_tinympc.wbt`
+- **README**: `crazyflie-simulation/simulator_files/webots/controllers/crazyflie_tinympc/README.md`
+
+### State-Space Model (12 states, 4 inputs)
+
+**State vector**:
+```
+x = [px, py, pz, vx, vy, vz, phi, theta, psi, p, q, r]
+```
+- Position: px, py, pz (m)
+- Velocity: vx, vy, vz (m/s)
+- Euler angles: phi (roll), theta (pitch), psi (yaw) (rad)
+- Angular rates: p, q, r (rad/s)
+
+**Control input**:
+```
+u = [thrust_delta, roll_moment, pitch_moment, yaw_moment]
+```
+
+### MPC Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| dt | 10ms | 100Hz control rate |
+| N (horizon) | 10 | 100ms prediction window |
+| Hover height | 0.5m | Default target altitude |
+
+### Cost Matrices
+
+**Q (state cost)**:
+- Position: [10, 10, 20] - z weighted higher for altitude hold
+- Velocity: [1, 1, 1]
+- Angles: [5, 5, 2] - roll/pitch weighted higher
+- Angular rates: [0.1, 0.1, 0.1]
+
+**R (input cost)**: [1, 10, 10, 10]
+
+### Environment Setup
+
+TinyMPC requires a separate virtual environment due to scipy version conflicts with cflib:
+
+```bash
+# Create simulation environment
+python3 -m venv .venv_sim
+source .venv_sim/bin/activate
+pip install tinympc numpy scipy
+```
+
+### Usage
+
+1. Open Webots
+2. Load: `worlds/crazyflie_tinympc.wbt`
+3. Run simulation
+
+**Keyboard Controls**:
+- Arrow keys: Move target X/Y (±0.1m)
+- W/S: Adjust altitude (±0.1m)
+- R: Reset to origin
+- SPACE: Print status
+
+### Linearized Dynamics
+
+Near hover equilibrium:
+```
+ṗx = vx,  ṗy = vy,  ṗz = vz
+v̇x = g·θ,  v̇y = -g·φ,  v̇z = thrust_delta/mass
+φ̇ = p,  θ̇ = q,  ψ̇ = r
+ṗ = τ_roll/Ixx,  q̇ = τ_pitch/Iyy,  ṙ = τ_yaw/Izz
+```
+
+### References
+
+- [TinyMPC GitHub](https://github.com/TinyMPC/TinyMPC)
+- [TinyMPC Paper](https://brianplancher.com/publication/tinympc/)
+- [Bitcraze TinyMPC Blog](https://www.bitcraze.io/2024/07/bringing-model-predictive-control-to-the-crazyflie-with-tinympc/)
+
+---
+
 ## New Feature: Fixed Position Controller (2025-11-06)
 
 ### Overview
