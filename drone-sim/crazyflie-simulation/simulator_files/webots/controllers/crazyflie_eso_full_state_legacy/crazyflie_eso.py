@@ -1,5 +1,5 @@
 """
-Crazyflie outer-loop controller with 9-State ESO (Position + Velocity + Force Disturbances).
+Crazyflie outer-loop controller with Full-State ESO structure.
 """
 
 from controller import Robot, Keyboard
@@ -8,14 +8,14 @@ import sys
 sys.path.append('../../../../controllers_shared/python_based')
 
 from pid_controller import pid_velocity_fixed_height_controller
-from eso import ReducedESO
+from eso import FullStateESO
 from design_L import compute_L
 
 # =========================
 # ESO CONTROL MODE
 # =========================
-USE_ESO_FOR_CONTROL = True  # Set to True to use ESO estimates in control loop
-                             # Set to False to only monitor/log ESO (use raw sensors)
+USE_ESO_FOR_CONTROL = False  # Set to True to use ESO estimates in control loop
+                              # Set to False to only monitor/log ESO (use raw sensors)
 
 # =========================
 # Sim
@@ -25,13 +25,13 @@ timestep = int(robot.getBasicTimeStep())
 Ts = timestep / 1000.0
 
 # =========================
-# ESO initialization (9-state)
+# ESO initialization
 # =========================
-m = 0.031  # AMY: Need to hand measure this
-g = 9.81
+m = 0.031 # AMY: Need to hand measure this
+J = np.diag([1.4e-5, 1.4e-5, 2.17e-5])
 
 # 1) Create ESO with zero gains first
-eso = ReducedESO(Ts, np.zeros((9,3)), m, g)
+eso = FullStateESO(Ts, np.zeros((18,6)), m, J)
 
 # 2) Design L using system model
 L = compute_L(eso, m)
@@ -89,8 +89,10 @@ print(f"GPS initialized at position {pos0}")
 # =========================
 # Initialize ESO from first measurement
 # =========================
-eso.initialize_from_measurement(pos0)
-print(f"ESO initialized with position: {pos0}")
+roll0, pitch0, yaw0 = imu.getRollPitchYaw()
+y_init = np.array([pos0[0], pos0[1], pos0[2], roll0, pitch0, yaw0])
+eso.initialize_from_measurement(y_init)
+print(f"ESO initialized with state: pos={pos0}, rpy=({roll0:.3f},{pitch0:.3f},{yaw0:.3f})")
 
 # =========================
 # Helper
@@ -102,6 +104,13 @@ def body_velocity_from_global(vx_g, vy_g, yaw):
     vy = -vx_g * siny + vy_g * cosy
     return vx, vy
 
+def global_velocity_from_body(vx_b, vy_b, yaw):
+    """Transform body velocities to global frame."""
+    cosy, siny = np.cos(yaw), np.sin(yaw)
+    vx_g = vx_b * cosy - vy_b * siny
+    vy_g = vx_b * siny + vy_b * cosy
+    return vx_g, vy_g
+
 # =========================
 # Inner PID controller
 # =========================
@@ -110,7 +119,10 @@ PID_CF = pid_velocity_fixed_height_controller()
 # =========================
 # Desired hover control input
 # =========================
-T_cmd = m * g
+T_cmd = m * 9.81
+tau_x_cmd = 0.0
+tau_y_cmd = 0.0
+tau_z_cmd = 0.0
 
 # =========================
 # Target position
@@ -120,8 +132,8 @@ target = np.array([0.0, 0.0, 0.5])
 # =========================
 # PD gains
 # =========================
-Kp_pos = 0.5   # Reduced from 2.0 for stability
-Kd_pos = 0.3   # Reduced from 0.8 for stability
+Kp_pos = 2.0   # 1.5
+Kd_pos = 0.8   # 0.4
 
 past_time = robot.getTime()
 past_pos = pos0.copy()
@@ -129,13 +141,13 @@ past_pos = pos0.copy()
 # =========================
 # Velocity limits
 # =========================
-VEL_LIMIT = 0.3  # m/s - reduced for safety
+VEL_LIMIT = 0.5  # m/s
 
 # =========================
 # Print timing control
 # =========================
 last_print_time = 0.0
-PRINT_INTERVAL = 0.5  # seconds
+PRINT_INTERVAL = 0.1  # seconds
 
 # =========================
 # MAIN LOOP
@@ -170,14 +182,21 @@ while robot.step(timestep) != -1:
     # ------------------------------
     # 2) ESO update (ALWAYS runs for monitoring)
     # ------------------------------
-    # ESO needs: position measurement, thrust, and attitude
-    z_hat = eso.step(pos, T_cmd, roll, pitch, yaw)
+    y_meas = np.array([pos[0], pos[1], pos[2],
+                       roll, pitch, yaw])
+
+    u_cmd = np.array([T_cmd, tau_x_cmd, tau_y_cmd, tau_z_cmd])
+    z_hat = eso.step(y_meas, u_cmd)
 
     # Extract estimated states
-    eso_p = z_hat[0:3]      # Position (world frame)
-    eso_v = z_hat[3:6]      # Velocity (world frame)
-    eso_d_f = z_hat[6:9]    # Force disturbances (world frame, N)
+    eso_p = z_hat[0:3]
+    eso_v = z_hat[3:6]      # Velocity in WORLD frame
+    eso_euler = z_hat[6:9]
+    eso_omega = z_hat[9:12]
+    eso_d_f   = z_hat[12:15]  # Force disturbances
+    eso_d_tau = z_hat[15:18]  # Torque disturbances
 
+    eso_roll, eso_pitch, eso_yaw = eso_euler
     eso_vx_world, eso_vy_world, eso_vz = eso_v
 
     # ------------------------------
@@ -189,6 +208,7 @@ while robot.step(timestep) != -1:
         ctrl_vx_world = eso_vx_world
         ctrl_vy_world = eso_vy_world
         ctrl_vz = eso_vz
+        ctrl_yaw = yaw  # Still use IMU for yaw (more reliable)
         source_label = "ESO"
     else:
         # Use raw sensors for control (baseline)
@@ -196,10 +216,8 @@ while robot.step(timestep) != -1:
         ctrl_vx_world = gps_velocity[0]
         ctrl_vy_world = gps_velocity[1]
         ctrl_vz = gps_velocity[2]
+        ctrl_yaw = yaw
         source_label = "GPS"
-
-    # Always use IMU for attitude (ESO doesn't estimate it)
-    ctrl_yaw = yaw
 
     # ------------------------------
     # 4) Position → velocity command (in WORLD frame)
@@ -261,10 +279,8 @@ while robot.step(timestep) != -1:
         motor_power = np.array([100, 100, 100, 100])
 
     # Attitude safety check
-    if abs(roll) > np.pi/4 or abs(pitch) > np.pi/4:  # > 45° (reduced from 60°)
+    if abs(roll) > np.pi/3 or abs(pitch) > np.pi/3:  # > 60°
         print(f"WARNING: Extreme attitude at t={t:.2f}, roll={roll*180/np.pi:.1f}°, pitch={pitch*180/np.pi:.1f}°")
-        # Emergency: cut to minimum thrust
-        motor_power = np.array([20, 20, 20, 20])
 
     # Apply to motors
     motors[0].setVelocity(-motor_power[0])
@@ -281,7 +297,6 @@ while robot.step(timestep) != -1:
         pos_error_norm = np.linalg.norm(pos_err)
         vel_world_norm = np.linalg.norm([eso_vx_world, eso_vy_world, eso_vz])
         gps_vel_norm = np.linalg.norm(gps_velocity)
-        dist_force_norm = np.linalg.norm(eso_d_f)
         
         print(f"\n{'='*60}")
         print(f"Time: {t:.2f}s | Control Source: {source_label}")
@@ -303,10 +318,7 @@ while robot.step(timestep) != -1:
               f"yaw={yaw*180/np.pi:+.1f}°")
         
         # ESO disturbances (always shown for monitoring)
-        print(f"Force Disturbances: ({eso_d_f[0]:+.4f}, {eso_d_f[1]:+.4f}, {eso_d_f[2]:+.4f})N, "
-              f"norm={dist_force_norm:.4f}N")
-        print(f"  As % of weight: {100*dist_force_norm/(m*g):.1f}%")
-        
+        print(f"Disturbances: F=({eso_d_f[0]:+.4f}, {eso_d_f[1]:+.4f}, {eso_d_f[2]:+.4f})N, "
+              f"τ=({eso_d_tau[0]:+.5f}, {eso_d_tau[1]:+.5f}, {eso_d_tau[2]:+.5f})N·m")
         print(f"Motor power: [{motor_power[0]:.1f}, {motor_power[1]:.1f}, "
               f"{motor_power[2]:.1f}, {motor_power[3]:.1f}]")
-

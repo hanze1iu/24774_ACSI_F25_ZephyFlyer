@@ -1,97 +1,86 @@
 import numpy as np
 
-class FullStateESO:
+class ReducedESO:
     """
-    Full nonlinear 18-state Extended State Observer for Crazyflie-style quadrotor.
+    9-state Extended State Observer for position, velocity, and force disturbances.
+    
+    Uses IMU attitude measurements directly (not estimated).
+    
+    State z (9×1):
+        z = [ x, y, z,           # position (world frame)
+              vx, vy, vz,         # velocity (world frame)
+              dx, dy, dz ]        # force disturbance (world frame, N)
+    
+    Measurements y (3×1):
+        y = [ x, y, z ]          # GPS position
+    
+    Inputs:
+        u = T (scalar thrust, N)
+        roll, pitch, yaw (from IMU)
     """
 
-    def __init__(self, Ts, L, m=0.027, J=None, g=9.81):
+    def __init__(self, Ts, L, m=0.027, g=9.81):
         self.Ts = Ts
         self.m = float(m)
         self.g = float(g)
 
-        if J is None:
-            J = np.diag([1.395e-5, 1.436e-5, 2.173e-5])
-        self.J = np.array(J, dtype=float)
-        self.J_inv = np.linalg.inv(self.J)
-
-        # ESO gain (18×6) - MUST be discrete gain
-        self.L = np.array(L, dtype=float).reshape(18, 6)
-        self.z = np.zeros(18)
+        # ESO gain (9×3)
+        self.L = np.array(L, dtype=float).reshape(9, 3)
+        self.z = np.zeros(9)
 
     @staticmethod
-    def _R(eta):
-        phi, theta, psi = eta
-        cphi, sphi = np.cos(phi), np.sin(phi)
-        cth, sth = np.cos(theta), np.sin(theta)
-        cpsi, spsi = np.cos(psi), np.sin(psi)
+    def _R(roll, pitch, yaw):
+        """Rotation matrix body->world (ZYX Euler convention)"""
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
 
         return np.array([
-            [cth*cpsi,  cth*spsi, -sth],
-            [sphi*sth*cpsi - cphi*spsi,
-             sphi*sth*spsi + cphi*cpsi,
-             sphi*cth],
-            [cphi*sth*cpsi + sphi*spsi,
-             cphi*sth*spsi - sphi*cpsi,
-             cphi*cth]
+            [cp*cy, sr*sp*cy - cr*sy, cr*sp*cy + sr*sy],
+            [cp*sy, sr*sp*sy + cr*cy, cr*sp*sy - sr*cy],
+            [-sp,   sr*cp,            cr*cp]
         ])
 
-    @staticmethod
-    def _E(eta):
-        phi, theta, _ = eta
-        cphi, sphi = np.cos(phi), np.sin(phi)
+    def f_continuous(self, z, u, roll, pitch, yaw):
+        """
+        Continuous dynamics with attitude passed in from IMU.
         
-        # Clamp theta to avoid singularity
-        theta_safe = np.clip(theta, -np.pi/2 + 0.1, np.pi/2 - 0.1)
-        cth, sth = np.cos(theta_safe), np.sin(theta_safe)
-        tan_th = np.tan(theta_safe)
+        Args:
+            z: state [x,y,z, vx,vy,vz, dx,dy,dz]
+            u: scalar thrust T (in Newtons)
+            roll, pitch, yaw: measured from IMU (radians)
+        """
+        z = np.asarray(z).reshape(9)
+        T = float(u)
 
-        return np.array([
-            [1.0,  sphi*tan_th,  cphi*tan_th],
-            [0.0,  cphi,        -sphi],
-            [0.0,  sphi/cth,     cphi/cth],
-        ])
+        pos = z[0:3]
+        vel = z[3:6]
+        d_f = z[6:9]
 
-    def f_continuous(self, z, u):
-        z = np.asarray(z).reshape(18)
-        u = np.asarray(u).reshape(4)
+        # Rotation matrix using measured attitude
+        R = self._R(roll, pitch, yaw)
 
-        p = z[0:3]
-        v = z[3:6]
-        eta = z[6:9]
-        omega = z[9:12]
-        d_f = z[12:15]
-        d_tau = z[15:18]
+        # Position dynamics
+        dp = vel
 
-        T = u[0]
-        tau = u[1:4]
-
-        R = self._R(eta)
-        E = self._E(eta)
-
-        dp = v
-        
-        thrust_world = R @ np.array([0, 0, T])
+        # Velocity dynamics
+        # a = R·[0,0,T]/m - [0,0,g] + d_f
+        thrust_body = np.array([0, 0, T])
+        thrust_world = R @ thrust_body
         dv = -np.array([0, 0, self.g]) + thrust_world / self.m + d_f
 
-        deta = E @ omega
-
-        domega = self.J_inv @ (tau - np.cross(omega, self.J @ omega) + d_tau)
-
+        # Disturbance dynamics (constant/slowly-varying)
         dd_f = np.zeros(3)
-        dd_tau = np.zeros(3)
 
-        return np.concatenate([dp, dv, deta, domega, dd_f, dd_tau])
+        return np.concatenate([dp, dv, dd_f])
 
-    def jacobian_x(self, z, u):
-        """Improved Jacobian with central differences."""
+    def jacobian_x(self, z, u, roll, pitch, yaw):
+        """Jacobian w.r.t. state using central differences."""
         z = np.asarray(z)
-        u = np.asarray(u)
         n = len(z)
         A = np.zeros((n, n))
         
         for i in range(n):
-            # Adaptive epsilon
             eps = max(1e-6, 1e-5 * abs(z[i]))
             
             zp = z.copy()
@@ -99,70 +88,58 @@ class FullStateESO:
             zp[i] += eps
             zm[i] -= eps
             
-            fp = self.f_continuous(zp, u)
-            fm = self.f_continuous(zm, u)
+            fp = self.f_continuous(zp, u, roll, pitch, yaw)
+            fm = self.f_continuous(zm, u, roll, pitch, yaw)
             A[:, i] = (fp - fm) / (2 * eps)
         
         return A
 
-    def jacobian_u(self, z, u):
-        """Improved Jacobian with central differences."""
+    def jacobian_u(self, z, u, roll, pitch, yaw):
+        """Jacobian w.r.t. thrust input."""
         z = np.asarray(z)
-        u = np.asarray(u)
-        m = len(u)
-        B = np.zeros((len(z), m))
+        B = np.zeros((len(z), 1))
         
-        for j in range(m):
-            eps = max(1e-6, 1e-5 * abs(u[j]))
-            
-            up = u.copy()
-            um = u.copy()
-            up[j] += eps
-            um[j] -= eps
-            
-            fp = self.f_continuous(z, up)
-            fm = self.f_continuous(z, um)
-            B[:, j] = (fp - fm) / (2 * eps)
+        eps = max(1e-6, 1e-5 * abs(u)) if abs(u) > 1e-8 else 1e-6
+        
+        fp = self.f_continuous(z, u + eps, roll, pitch, yaw)
+        fm = self.f_continuous(z, u - eps, roll, pitch, yaw)
+        B[:, 0] = (fp - fm) / (2 * eps)
         
         return B
 
-    def linearize_continuous(self, z, u):
-        A = self.jacobian_x(z, u)
-        B = self.jacobian_u(z, u)
+    def linearize_continuous(self, z, u, roll, pitch, yaw):
+        """Linearize dynamics around current state."""
+        A = self.jacobian_x(z, u, roll, pitch, yaw)
+        B = self.jacobian_u(z, u, roll, pitch, yaw)
         return A, B
 
-    def linearize_discrete(self, z, u):
-        A, B = self.linearize_continuous(z, u)
-        Ts = self.Ts
-        Ad = np.eye(18) + Ts * A
-        Bd = Ts * B
-        return Ad, Bd
-
-    def step(self, y_meas, u):
+    def step(self, y_pos, u_thrust, roll, pitch, yaw):
         """
         Discrete-time predictor-corrector ESO update.
-        CRITICAL: L must be the discrete gain (not continuous).
+        
+        Args:
+            y_pos: measured position [x, y, z] from GPS
+            u_thrust: scalar thrust T (Newtons)
+            roll, pitch, yaw: measured attitude from IMU (radians)
         """
         Ts = self.Ts
         
         # PREDICT
-        z_pred = self.z + Ts * self.f_continuous(self.z, u)
+        z_pred = self.z + Ts * self.f_continuous(self.z, u_thrust, roll, pitch, yaw)
         
-        # INNOVATION from predicted state
-        y_pred = np.array([
-            z_pred[0], z_pred[1], z_pred[2],
-            z_pred[6], z_pred[7], z_pred[8]
-        ])
-        r = y_meas - y_pred
+        # INNOVATION (from predicted position)
+        y_pred = z_pred[0:3]  # predicted position
+        r = y_pos - y_pred
         
         # CORRECT
         self.z = z_pred + self.L @ r
         
         return self.z
 
-    def initialize_from_measurement(self, y_meas):
-        y = np.asarray(y_meas)
+    def initialize_from_measurement(self, y_pos):
+        """Initialize ESO from first GPS measurement."""
+        y = np.asarray(y_pos)
         self.z[:] = 0.0
-        self.z[0:3] = y[0:3]
-        self.z[6:9] = y[3:6]
+        self.z[0:3] = y  # position
+        # velocity and disturbances initialize to zero
         return self.z
