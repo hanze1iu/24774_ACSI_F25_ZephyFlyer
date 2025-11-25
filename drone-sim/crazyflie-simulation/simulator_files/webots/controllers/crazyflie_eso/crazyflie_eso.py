@@ -1,5 +1,5 @@
 """
-Crazyflie outer-loop controller with 9-State ESO (Position + Velocity + Force Disturbances).
+Crazyflie outer-loop controller with 12-State ESO.
 """
 
 from controller import Robot, Keyboard
@@ -8,14 +8,13 @@ import sys
 sys.path.append('../../../../controllers_shared/python_based')
 
 from pid_controller import pid_velocity_fixed_height_controller
-from eso import ReducedESO
+from eso import AttitudeESO
 from design_L import compute_L
 
 # =========================
 # ESO CONTROL MODE
 # =========================
-USE_ESO_FOR_CONTROL = True  # Set to True to use ESO estimates in control loop
-                             # Set to False to only monitor/log ESO (use raw sensors)
+USE_ESO_FOR_CONTROL = True
 
 # =========================
 # Sim
@@ -25,22 +24,22 @@ timestep = int(robot.getBasicTimeStep())
 Ts = timestep / 1000.0
 
 # =========================
-# ESO initialization (9-state)
+# ESO initialization (12-state)
 # =========================
-m = 0.031  # AMY: Need to hand measure this
+m = 0.031
 g = 9.81
 
 # 1) Create ESO with zero gains first
-eso = ReducedESO(Ts, np.zeros((9,3)), m, g)
+eso = AttitudeESO(Ts, np.zeros((12,6)), m, g)
 
-# 2) Design L using system model
+# 2) Design L
 L = compute_L(eso, m)
 
 # 3) Assign
 eso.L = L
 
 print(f"\n{'='*60}")
-print(f"ESO MODE: {'ACTIVE (using ESO for control)' if USE_ESO_FOR_CONTROL else 'MONITORING ONLY (raw sensors for control)'}")
+print(f"ESO MODE: {'ACTIVE' if USE_ESO_FOR_CONTROL else 'MONITORING ONLY'}")
 print(f"{'='*60}\n")
 
 # =========================
@@ -67,7 +66,7 @@ for motor in motors:
     motor.setVelocity(0.0)
 
 # =========================
-# Wait for GPS and IMU initialization
+# Wait for initialization
 # =========================
 print("Waiting for sensor initialization...")
 initialization_steps = 0
@@ -84,229 +83,146 @@ while robot.step(timestep) != -1:
         print("Warning: Sensor initialization taking longer than expected")
         break
 
-print(f"GPS initialized at position {pos0}")
+print(f"Sensors initialized: pos={pos0}, rpy={rpy0}")
 
 # =========================
-# Initialize ESO from first measurement
+# Initialize ESO
 # =========================
-eso.initialize_from_measurement(pos0)
-print(f"ESO initialized with position: {pos0}")
+y_init = np.array([pos0[0], pos0[1], pos0[2], rpy0[0], rpy0[1], rpy0[2]])
+eso.initialize_from_measurement(y_init)
+print(f"ESO initialized")
 
 # =========================
 # Helper
 # =========================
 def body_velocity_from_global(vx_g, vy_g, yaw):
-    """Transform global velocities to body frame."""
     cosy, siny = np.cos(yaw), np.sin(yaw)
     vx = vx_g * cosy + vy_g * siny
     vy = -vx_g * siny + vy_g * cosy
     return vx, vy
 
 # =========================
-# Inner PID controller
+# Controller
 # =========================
 PID_CF = pid_velocity_fixed_height_controller()
-
-# =========================
-# Desired hover control input
-# =========================
 T_cmd = m * g
-
-# =========================
-# Target position
-# =========================
 target = np.array([0.0, 0.0, 0.5])
 
-# =========================
-# PD gains
-# =========================
-Kp_pos = 0.5   # Reduced from 2.0 for stability
-Kd_pos = 0.3   # Reduced from 0.8 for stability
+Kp_pos = 0.5
+Kd_pos = 0.3
+VEL_LIMIT = 0.3
 
 past_time = robot.getTime()
 past_pos = pos0.copy()
 
-# =========================
-# Velocity limits
-# =========================
-VEL_LIMIT = 0.3  # m/s - reduced for safety
-
-# =========================
-# Print timing control
-# =========================
+PRINT_INTERVAL = 0.5
 last_print_time = 0.0
-PRINT_INTERVAL = 0.5  # seconds
 
 # =========================
 # MAIN LOOP
 # =========================
 print("Starting main control loop...")
-loop_count = 0
 
 while robot.step(timestep) != -1:
-
     t = robot.getTime()
     dt = max(t - past_time, 1e-6)
     past_time = t
-    loop_count += 1
 
-    # ------------------------------
-    # 1) Read sensors
-    # ------------------------------
+    # Read sensors
     pos = np.array(gps.getValues())
-    roll, pitch, yaw = imu.getRollPitchYaw()  # Direct from IMU
+    roll, pitch, yaw = imu.getRollPitchYaw()
     omega_body = np.array(gyro.getValues())
     yaw_rate = omega_body[2]
 
-    # Sanity check for sensor readings
     if not (np.isfinite(pos).all() and np.isfinite([roll, pitch, yaw]).all()):
         print(f"Warning: Invalid sensor readings at t={t:.2f}")
         continue
 
-    # Compute velocity from GPS (simple differentiation for baseline)
     gps_velocity = (pos - past_pos) / dt
     past_pos = pos.copy()
 
-    # ------------------------------
-    # 2) ESO update (ALWAYS runs for monitoring)
-    # ------------------------------
-    # ESO needs: position measurement, thrust, and attitude
-    z_hat = eso.step(pos, T_cmd, roll, pitch, yaw)
+    # ESO update - NOW with IMU measurements!
+    y_meas = np.array([pos[0], pos[1], pos[2], roll, pitch, yaw])
+    z_hat = eso.step(y_meas, T_cmd, omega_body)
 
-    # Extract estimated states
-    eso_p = z_hat[0:3]      # Position (world frame)
-    eso_v = z_hat[3:6]      # Velocity (world frame)
-    eso_d_f = z_hat[6:9]    # Force disturbances (world frame, N)
+    # Extract states
+    eso_p = z_hat[0:3]
+    eso_v = z_hat[3:6]
+    eso_att = z_hat[6:9]    # Estimated attitude!
+    eso_d_f = z_hat[9:12]
+    
+    eso_roll, eso_pitch, eso_yaw = eso_att
 
-    eso_vx_world, eso_vy_world, eso_vz = eso_v
-
-    # ------------------------------
-    # 3) Choose control source based on USE_ESO_FOR_CONTROL
-    # ------------------------------
+    # Choose control source
     if USE_ESO_FOR_CONTROL:
-        # Use ESO estimates for control
         ctrl_pos = eso_p
-        ctrl_vx_world = eso_vx_world
-        ctrl_vy_world = eso_vy_world
-        ctrl_vz = eso_vz
+        ctrl_vx_world, ctrl_vy_world, ctrl_vz = eso_v
+        ctrl_roll = eso_roll      # Use ESO attitude!
+        ctrl_pitch = eso_pitch
+        ctrl_yaw = eso_yaw
         source_label = "ESO"
     else:
-        # Use raw sensors for control (baseline)
         ctrl_pos = pos
-        ctrl_vx_world = gps_velocity[0]
-        ctrl_vy_world = gps_velocity[1]
-        ctrl_vz = gps_velocity[2]
-        source_label = "GPS"
+        ctrl_vx_world, ctrl_vy_world, ctrl_vz = gps_velocity
+        ctrl_roll = roll          # Use IMU attitude
+        ctrl_pitch = pitch
+        ctrl_yaw = yaw
+        source_label = "GPS+IMU"
 
-    # Always use IMU for attitude (ESO doesn't estimate it)
-    ctrl_yaw = yaw
-
-    # ------------------------------
-    # 4) Position → velocity command (in WORLD frame)
-    # ------------------------------
+    # Position control
     pos_err = target - ctrl_pos
+    vx_des = Kp_pos * pos_err[0] + Kd_pos * (-ctrl_vx_world)
+    vy_des = Kp_pos * pos_err[1] + Kd_pos * (-ctrl_vy_world)
+    vz_des = Kp_pos * pos_err[2] + Kd_pos * (-ctrl_vz)
 
-    vx_des_world = Kp_pos * pos_err[0] + Kd_pos * (-ctrl_vx_world)
-    vy_des_world = Kp_pos * pos_err[1] + Kd_pos * (-ctrl_vy_world)
-    vz_des_world = Kp_pos * pos_err[2] + Kd_pos * (-ctrl_vz)
+    vx_des = np.clip(vx_des, -VEL_LIMIT, VEL_LIMIT)
+    vy_des = np.clip(vy_des, -VEL_LIMIT, VEL_LIMIT)
+    vz_des = np.clip(vz_des, -VEL_LIMIT, VEL_LIMIT)
 
-    vx_des_world = np.clip(vx_des_world, -VEL_LIMIT, VEL_LIMIT)
-    vy_des_world = np.clip(vy_des_world, -VEL_LIMIT, VEL_LIMIT)
-    vz_des_world = np.clip(vz_des_world, -VEL_LIMIT, VEL_LIMIT)
+    # Transform to body frame
+    v_body_x_des, v_body_y_des = body_velocity_from_global(vx_des, vy_des, ctrl_yaw)
+    ctrl_vx_body, ctrl_vy_body = body_velocity_from_global(ctrl_vx_world, ctrl_vy_world, ctrl_yaw)
 
-    # ------------------------------
-    # 5) Transform to body frame for PID controller
-    # ------------------------------
-    v_body_x_des, v_body_y_des = body_velocity_from_global(
-        vx_des_world, vy_des_world, ctrl_yaw
-    )
-
-    forward_desired = v_body_x_des
-    sideways_desired = v_body_y_des
-    yaw_desired = 0.0
-    height_desired = target[2]
-
-    # ------------------------------
-    # 6) Inner PID controller
-    # ------------------------------
-    # Convert control velocities to body frame
-    ctrl_vx_body, ctrl_vy_body = body_velocity_from_global(
-        ctrl_vx_world, ctrl_vy_world, ctrl_yaw
-    )
-
-    # Use IMU attitude directly (always - most reliable)
+    # Inner PID - USE ESO ATTITUDE if enabled!
     motor_power = PID_CF.pid(
         dt,
-        forward_desired,      # Body-frame x velocity command
-        sideways_desired,     # Body-frame y velocity command
-        yaw_desired,          # Yaw angle command
-        height_desired,       # Altitude command
-        roll,                 # IMU roll
-        pitch,                # IMU pitch
-        yaw_rate,             # Gyro yaw rate
-        ctrl_pos[2],          # Altitude (ESO or GPS)
-        ctrl_vx_body,         # Body velocity x (ESO or GPS-derived)
-        ctrl_vy_body          # Body velocity y (ESO or GPS-derived)
+        v_body_x_des,
+        v_body_y_des,
+        0.0,
+        target[2],
+        ctrl_roll,       # ESO or IMU
+        ctrl_pitch,      # ESO or IMU
+        yaw_rate,
+        ctrl_pos[2],
+        ctrl_vx_body,
+        ctrl_vy_body
     )
 
-    # ------------------------------
-    # 7) Safety checks and motor application
-    # ------------------------------
-    # Clamp motor commands
+    # Safety
     motor_power = np.clip(motor_power, 0, 600)
 
-    # Sanity check
     if np.any(np.isnan(motor_power)) or np.any(np.isinf(motor_power)):
         print(f"ERROR: Invalid motor commands at t={t:.2f}")
         motor_power = np.array([100, 100, 100, 100])
 
-    # Attitude safety check
-    if abs(roll) > np.pi/4 or abs(pitch) > np.pi/4:  # > 45° (reduced from 60°)
-        print(f"WARNING: Extreme attitude at t={t:.2f}, roll={roll*180/np.pi:.1f}°, pitch={pitch*180/np.pi:.1f}°")
-        # Emergency: cut to minimum thrust
+    if abs(ctrl_roll) > np.pi/4 or abs(ctrl_pitch) > np.pi/4:
+        print(f"WARNING: Extreme attitude at t={t:.2f}")
         motor_power = np.array([20, 20, 20, 20])
 
-    # Apply to motors
+    # Apply motors
     motors[0].setVelocity(-motor_power[0])
     motors[1].setVelocity( motor_power[1])
     motors[2].setVelocity(-motor_power[2])
     motors[3].setVelocity( motor_power[3])
 
-    # ------------------------------
-    # 8) Debug prints
-    # ------------------------------
+    # Prints
     if (t - last_print_time) >= PRINT_INTERVAL:
         last_print_time = t
         
-        pos_error_norm = np.linalg.norm(pos_err)
-        vel_world_norm = np.linalg.norm([eso_vx_world, eso_vy_world, eso_vz])
-        gps_vel_norm = np.linalg.norm(gps_velocity)
-        dist_force_norm = np.linalg.norm(eso_d_f)
-        
         print(f"\n{'='*60}")
         print(f"Time: {t:.2f}s | Control Source: {source_label}")
-        print(f"Position: GPS=({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f}), "
-              f"ESO=({eso_p[0]:+.3f}, {eso_p[1]:+.3f}, {eso_p[2]:+.3f})")
-        print(f"Error: ({pos_err[0]:+.3f}, {pos_err[1]:+.3f}, {pos_err[2]:+.3f}), "
-              f"norm={pos_error_norm:.3f}m")
-        
-        # Show both velocity sources for comparison
-        print(f"Velocity ESO:  ({eso_vx_world:+.3f}, {eso_vy_world:+.3f}, {eso_vz:+.3f}), "
-              f"norm={vel_world_norm:.3f}m/s")
-        print(f"Velocity GPS:  ({gps_velocity[0]:+.3f}, {gps_velocity[1]:+.3f}, {gps_velocity[2]:+.3f}), "
-              f"norm={gps_vel_norm:.3f}m/s")
-        print(f"Velocity CTRL: ({ctrl_vx_world:+.3f}, {ctrl_vy_world:+.3f}, {ctrl_vz:+.3f}) "
-              f"[using {source_label}]")
-        
-        print(f"Attitude (IMU): roll={roll*180/np.pi:+.1f}°, "
-              f"pitch={pitch*180/np.pi:+.1f}°, "
-              f"yaw={yaw*180/np.pi:+.1f}°")
-        
-        # ESO disturbances (always shown for monitoring)
-        print(f"Force Disturbances: ({eso_d_f[0]:+.4f}, {eso_d_f[1]:+.4f}, {eso_d_f[2]:+.4f})N, "
-              f"norm={dist_force_norm:.4f}N")
-        print(f"  As % of weight: {100*dist_force_norm/(m*g):.1f}%")
-        
-        print(f"Motor power: [{motor_power[0]:.1f}, {motor_power[1]:.1f}, "
-              f"{motor_power[2]:.1f}, {motor_power[3]:.1f}]")
-
+        print(f"Position: GPS=({pos[0]:+.3f},{pos[1]:+.3f},{pos[2]:+.3f}), ESO=({eso_p[0]:+.3f},{eso_p[1]:+.3f},{eso_p[2]:+.3f})")
+        print(f"Velocity: GPS=({gps_velocity[0]:+.3f},{gps_velocity[1]:+.3f},{gps_velocity[2]:+.3f}), ESO=({eso_v[0]:+.3f},{eso_v[1]:+.3f},{eso_v[2]:+.3f})")
+        print(f"Attitude: IMU=({roll*180/np.pi:+.1f}°,{pitch*180/np.pi:+.1f}°,{yaw*180/np.pi:+.1f}°), ESO=({eso_roll*180/np.pi:+.1f}°,{eso_pitch*180/np.pi:+.1f}°,{eso_yaw*180/np.pi:+.1f}°)")
+        print(f"Force Dist: ({eso_d_f[0]:+.4f},{eso_d_f[1]:+.4f},{eso_d_f[2]:+.4f})N")
+        print(f"Motors: [{motor_power[0]:.1f},{motor_power[1]:.1f},{motor_power[2]:.1f},{motor_power[3]:.1f}]")
