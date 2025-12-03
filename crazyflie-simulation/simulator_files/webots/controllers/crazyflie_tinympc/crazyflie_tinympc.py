@@ -24,6 +24,201 @@ import numpy as np
 import tinympc
 from controller import Robot, Motor, InertialUnit, GPS, Gyro, Keyboard
 from math import cos, sin, pi
+import csv
+import os
+import sys
+import time as pytime
+from datetime import datetime
+
+
+class MPCDataLogger:
+    """
+    Data logger for MPC analysis.
+
+    Records all relevant data for post-flight analysis:
+    - Time stamps
+    - Full state vector (12 states)
+    - Reference state
+    - MPC control outputs
+    - Motor commands
+    - Position/attitude errors
+    - MPC solver timing
+    """
+
+    def __init__(self, log_dir="logs", prefix="mpc", log_decimation=5):
+        """
+        Initialize the data logger.
+
+        Args:
+            log_dir: Directory to save log files
+            prefix: Prefix for log filename
+            log_decimation: Log every Nth sample (1=all, 5=every 5th, 10=every 10th)
+        """
+        self.log_dir = log_dir
+        self.prefix = prefix
+        self.data = []
+        self.start_time = None
+        self.logging_enabled = False
+        self.log_decimation = log_decimation
+        self.log_counter = 0
+
+        # Create log directory if needed
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            print(f"📁 Created log directory: {log_dir}")
+        print(f"📊 Log decimation: recording 1/{log_decimation} samples")
+
+    def start_logging(self):
+        """Start recording data."""
+        self.data = []
+        self.start_time = pytime.time()
+        self.logging_enabled = True
+        self.log_counter = 0  # Reset counter for new logging session
+        print("🔴 Logging STARTED")
+
+    def stop_logging(self):
+        """Stop recording data."""
+        self.logging_enabled = False
+        print(f"⬛ Logging STOPPED ({len(self.data)} samples recorded)")
+
+    def toggle_logging(self):
+        """Toggle logging on/off."""
+        if self.logging_enabled:
+            self.stop_logging()
+        else:
+            self.start_logging()
+        return self.logging_enabled
+
+    def log(self, sim_time, state, x_ref, u, motors, solve_time_ms=0.0):
+        """
+        Log one timestep of data.
+
+        Args:
+            sim_time: Simulation time (s)
+            state: 12-element state vector [px,py,pz,vx,vy,vz,phi,theta,psi,p,q,r]
+            x_ref: 12-element reference state
+            u: 4-element control input [thrust_delta, roll_mom, pitch_mom, yaw_mom]
+            motors: 4-element motor commands [m1,m2,m3,m4]
+            solve_time_ms: MPC solve time in milliseconds
+        """
+        if not self.logging_enabled:
+            return
+
+        # Decimation: only log every Nth sample
+        self.log_counter += 1
+        if self.log_counter % self.log_decimation != 0:
+            return
+
+        # Compute errors
+        pos_error = np.sqrt((state[0]-x_ref[0])**2 +
+                           (state[1]-x_ref[1])**2 +
+                           (state[2]-x_ref[2])**2)
+        vel_error = np.sqrt((state[3]-x_ref[3])**2 +
+                           (state[4]-x_ref[4])**2 +
+                           (state[5]-x_ref[5])**2)
+        att_error = np.sqrt((state[6]-x_ref[6])**2 +
+                           (state[7]-x_ref[7])**2 +
+                           (state[8]-x_ref[8])**2)
+
+        entry = {
+            # Time
+            'sim_time': sim_time,
+
+            # State - Position
+            'px': state[0], 'py': state[1], 'pz': state[2],
+            # State - Velocity
+            'vx': state[3], 'vy': state[4], 'vz': state[5],
+            # State - Attitude (rad)
+            'phi': state[6], 'theta': state[7], 'psi': state[8],
+            # State - Angular rates (rad/s)
+            'p': state[9], 'q': state[10], 'r': state[11],
+
+            # Reference - Position
+            'ref_px': x_ref[0], 'ref_py': x_ref[1], 'ref_pz': x_ref[2],
+            # Reference - Velocity (usually 0 for hover)
+            'ref_vx': x_ref[3], 'ref_vy': x_ref[4], 'ref_vz': x_ref[5],
+
+            # MPC Control Output
+            'u_thrust': u[0], 'u_roll': u[1], 'u_pitch': u[2], 'u_yaw': u[3],
+
+            # Motor Commands
+            'm1': motors[0], 'm2': motors[1], 'm3': motors[2], 'm4': motors[3],
+
+            # Errors
+            'pos_error': pos_error,
+            'vel_error': vel_error,
+            'att_error': att_error,
+
+            # Errors by axis (for detailed analysis)
+            'err_x': state[0] - x_ref[0],
+            'err_y': state[1] - x_ref[1],
+            'err_z': state[2] - x_ref[2],
+
+            # MPC Performance
+            'solve_time_ms': solve_time_ms,
+        }
+
+        self.data.append(entry)
+
+    def save(self, filename=None):
+        """
+        Save logged data to CSV file.
+
+        Args:
+            filename: Custom filename (optional). If None, auto-generates with timestamp.
+
+        Returns:
+            Path to saved file
+        """
+        if not self.data:
+            print("⚠️  No data to save!")
+            return None
+
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{self.prefix}_{timestamp}.csv"
+
+        filepath = os.path.join(self.log_dir, filename)
+
+        # Write CSV
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.data[0].keys())
+            writer.writeheader()
+            writer.writerows(self.data)
+
+        # Print summary
+        duration = self.data[-1]['sim_time'] - self.data[0]['sim_time']
+        print(f"\n📊 Log saved: {filepath}")
+        print(f"   Samples: {len(self.data)}")
+        print(f"   Duration: {duration:.2f}s")
+        print(f"   Avg sample rate: {len(self.data)/duration:.1f} Hz")
+
+        return filepath
+
+    def get_summary(self):
+        """Get summary statistics of logged data."""
+        if not self.data:
+            return "No data logged"
+
+        pos_errors = [d['pos_error'] for d in self.data]
+        solve_times = [d['solve_time_ms'] for d in self.data]
+
+        summary = f"""
+📈 MPC Log Summary ({len(self.data)} samples)
+{'='*50}
+Position Error (m):
+  Mean: {np.mean(pos_errors):.4f}
+  Max:  {np.max(pos_errors):.4f}
+  Min:  {np.min(pos_errors):.4f}
+  Std:  {np.std(pos_errors):.4f}
+
+MPC Solve Time (ms):
+  Mean: {np.mean(solve_times):.3f}
+  Max:  {np.max(solve_times):.3f}
+  Min:  {np.min(solve_times):.3f}
+{'='*50}
+"""
+        return summary
 
 
 def get_linearized_model(dt=0.01, mass=0.027, g=9.81,
@@ -101,20 +296,20 @@ def get_cost_matrices(nx=12, nu=4):
         Q: 12x12 state cost matrix
         R: 4x4 input cost matrix
     """
-    # State cost: prioritize position tracking, then velocity, then attitude
+    # State cost: Increase velocity weights for better damping
     Q = np.diag([
-        10.0, 10.0, 20.0,    # position (x, y, z) - z higher for altitude hold
-        1.0, 1.0, 1.0,       # velocity (vx, vy, vz)
-        5.0, 5.0, 2.0,       # angles (phi, theta, psi) - penalize roll/pitch more
-        0.1, 0.1, 0.1        # angular rates (p, q, r)
+        5.0E+01, 5.0E+01, 8.0E+01,    # position (x, y, z)
+        3.0E+01, 3.0E+01, 5.0E+01,    # velocity (increased 6x→5x for damping)
+        5.0E+01, 5.0E+01, 2.0E+01,    # angles (phi, theta, psi)
+        1.0E+00, 1.0E+00, 1.0E+00     # angular rates
     ])
 
-    # Input cost: penalize aggressive control
+    # Input cost: Reduce thrust penalty to allow larger control authority
     R = np.diag([
-        1.0,     # thrust
-        10.0,    # roll moment
-        10.0,    # pitch moment
-        10.0     # yaw moment
+        5.0E+00,    # Δthrust (reduced 10x: allow aggressive control)
+        1.0E+01,    # roll moment
+        1.0E+01,    # pitch moment
+        1.0E+01     # yaw moment
     ])
 
     # TinyMPC requires Fortran-contiguous arrays
@@ -141,7 +336,7 @@ class TinyMPCController:
         self.horizon = horizon
 
         # CrazyFlie parameters (approximate values for Webots model)
-        self.mass = 0.027  # kg
+        self.mass =  1.68E-02  # kg
         self.g = 9.81      # m/s^2
         self.Ixx = 1.6e-5  # kg*m^2
         self.Iyy = 1.6e-5
@@ -160,23 +355,54 @@ class TinyMPCController:
         self.nx = 12
         self.nu = 4
 
-        # Initialize TinyMPC solver (without constraints for initial testing)
+        # ========== Input Constraints ==========
+        # u = [Δthrust, roll_moment, pitch_moment, yaw_moment]
+        # Δthrust 是相对于 hover 的增量，单位 N
+        # Allow ±0.10 N around hover point
+        u_min = np.array([-0.10, -5e-3, -5e-3, -1e-3], dtype=np.float64)
+        u_max = np.array([+0.10, +5e-3, +5e-3, +1e-3], dtype=np.float64)
+
+        # ========== State Constraints ==========
+        # x = [px, py, pz, vx, vy, vz, phi, theta, psi, p, q, r]
+        # Attitude constraint: |phi|, |theta| <= 15 deg = 0.26 rad
+        angle_limit = 0.26  # 15 degrees in radians
+        x_min = np.full(self.nx, -1e6, dtype=np.float64)  # No constraint by default
+        x_max = np.full(self.nx, +1e6, dtype=np.float64)
+        # Roll (phi) constraint - index 6
+        x_min[6] = -angle_limit
+        x_max[6] = +angle_limit
+        # Pitch (theta) constraint - index 7
+        x_min[7] = -angle_limit
+        x_max[7] = +angle_limit
+
+        # Initialize TinyMPC solver with constraints in setup()
         self.solver = tinympc.TinyMPC()
-        self.solver.setup(self.A, self.B, self.Q, self.R, self.horizon)
+        self.solver.setup(self.A, self.B, self.Q, self.R, self.horizon,
+                          u_min=u_min, u_max=u_max,
+                          x_min=x_min, x_max=x_max,
+                          verbose=0)
+
+        print(f"  Constraints:")
+        print(f"    - Δthrust: [{u_min[0]:.2f}, {u_max[0]:.2f}] N")
+        print(f"    - Roll/Pitch moment: [{u_min[1]*1000:.1f}, {u_max[1]*1000:.1f}] mN·m")
+        print(f"    - Yaw moment: [{u_min[3]*1000:.1f}, {u_max[3]*1000:.1f}] mN·m")
+        print(f"    - Roll/Pitch angle: [{-angle_limit*180/pi:.0f}, {angle_limit*180/pi:.0f}] deg")
+
+        # For motor mixing (from PID/经验标定) - 需要先定义，后面 print 会用到
+        self.hover_thrust_cmd = 4.82E+01  # ≈ hover 时各电机指令
+        self.hover_thrust = self.mass * self.g  # hover推力 (N)
 
         # Reference state (hover position)
         self.x_ref = np.zeros(self.nx, dtype=np.float64)
         self.x_ref[2] = hover_height  # z position
 
-        # Reference input (zero for hover - thrust compensated in motor mixing)
+        # Reference input: Δthrust = 0 at hover (因为我们用增量控制)
         self.u_ref = np.zeros(self.nu, dtype=np.float64)
+        # u_ref[0] = 0 (Δthrust = 0 at hover)
 
         # Set references
         self.solver.set_x_ref(self.x_ref)
         self.solver.set_u_ref(self.u_ref)
-
-        # For motor mixing
-        self.hover_thrust_cmd = 48.0  # baseline motor command for hover
 
         print(f"TinyMPC Controller initialized:")
         print(f"  - Timestep: {dt*1000:.0f}ms ({1/dt:.0f}Hz)")
@@ -240,8 +466,19 @@ class TinyMPCController:
         # Set current state
         self.solver.set_x0(state)
 
-        # Solve MPC problem
-        solution = self.solver.solve()
+        # Solve MPC problem (suppress C-level stdout to hide iteration messages)
+        # Save original file descriptors
+        stdout_fd = sys.stdout.fileno()
+        saved_stdout_fd = os.dup(stdout_fd)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, stdout_fd)
+        os.close(devnull_fd)
+        try:
+            solution = self.solver.solve()
+        finally:
+            # Restore original stdout
+            os.dup2(saved_stdout_fd, stdout_fd)
+            os.close(saved_stdout_fd)
 
         # Get first control input
         u = solution['controls'][:, 0] if solution['controls'].ndim > 1 else solution['controls']
@@ -253,19 +490,28 @@ class TinyMPCController:
         Convert MPC control output to motor commands.
 
         Args:
-            u: [thrust_delta, roll_moment, pitch_moment, yaw_moment]
+            u: [Δthrust_normalized, roll_moment, pitch_moment, yaw_moment]
+               Δthrust_normalized ∈ [-1, +1], 映射到 [-0.10, +0.10] N
 
         Returns:
             motors: [m1, m2, m3, m4] motor velocities
         """
-        thrust_delta, roll_mom, pitch_mom, yaw_mom = u
+        d_thrust_n, roll_mom, pitch_mom, yaw_mom = u
 
-        # Scale factors to convert MPC output to motor command space
-        thrust_scale = 100.0   # thrust delta to motor units
+        # MPC outputs Δthrust directly in Newtons (not normalized)
+        # u[0] ∈ [-0.10, +0.10] N (set by constraints in __init__)
+        d_thrust = d_thrust_n  # Already in physical units (N)
+
+        # 先把 Δthrust 加回 hover thrust
+        thrust = self.hover_thrust + d_thrust  # N
+        thrust = max(0.0, thrust)  # 避免负推力
+
+        # 标定: hover_thrust -> hover_thrust_cmd
+        thrust_scale = self.hover_thrust_cmd / self.hover_thrust  # ≈ 292 cmd/N
         moment_scale = 5000.0  # moment to motor units
 
-        # Base thrust command (hover)
-        alt_cmd = self.hover_thrust_cmd + thrust_delta * thrust_scale
+        # 对应的高度通道指令
+        alt_cmd = thrust * thrust_scale
 
         # Moment commands
         roll_cmd = roll_mom * moment_scale
@@ -332,7 +578,7 @@ def main():
 
     # Initialize TinyMPC controller
     hover_height = 0.5  # Target hover height
-    horizon = 10        # MPC horizon (N)
+    horizon = 20        # MPC horizon (N), 总预测时间 ≈ 0.2s
 
     mpc = TinyMPCController(
         dt=control_dt,
@@ -349,9 +595,16 @@ def main():
     past_pos = [0.0, 0.0, 0.0]
     past_time = 0.0
 
-    # Logging
+    # Console logging
     last_print_time = 0.0
     print_interval = 1.0  # Print every 1 second
+
+    # Data logger for MPC analysis
+    logger = MPCDataLogger(log_dir="logs", prefix="tinympc")
+
+    # Keyboard debouncing
+    last_key_time = {}  # Track last time each key was pressed
+    KEY_DEBOUNCE = 0.3  # 300ms debounce
 
     print("\n" + "="*60)
     print("TinyMPC Hover Controller for CrazyFlie")
@@ -362,6 +615,10 @@ def main():
     print("  W/S: Adjust target altitude")
     print("  R: Reset to origin")
     print("  SPACE: Print status")
+    print("\nData Logging:")
+    print("  L: Toggle logging ON/OFF")
+    print("  K: Save log to CSV file")
+    print("  P: Print log summary")
     print("="*60 + "\n")
 
     # Wait for sensors to initialize
@@ -377,9 +634,15 @@ def main():
         imu_values = imu.getRollPitchYaw()
         gyro_values = gyro.getValues()
 
-        # Handle keyboard input
+        # Handle keyboard input with debouncing
         key = keyboard.getKey()
         while key > 0:
+            # Check debounce for this key
+            if key in last_key_time and (current_time - last_key_time[key]) < KEY_DEBOUNCE:
+                key = keyboard.getKey()
+                continue
+            last_key_time[key] = current_time
+
             if key == Keyboard.UP:
                 target_x += 0.1
                 mpc.set_target_position(target_x, target_y, target_z)
@@ -416,7 +679,15 @@ def main():
                 print(f"  Position: ({gps_values[0]:.3f}, {gps_values[1]:.3f}, {gps_values[2]:.3f})")
                 print(f"  Target:   ({target_x:.3f}, {target_y:.3f}, {target_z:.3f})")
                 print(f"  Error:    {pos_err:.4f}m")
-                print(f"  Attitude: roll={imu_values[0]*180/pi:.1f}, pitch={imu_values[1]*180/pi:.1f}, yaw={imu_values[2]*180/pi:.1f} deg\n")
+                print(f"  Attitude: roll={imu_values[0]*180/pi:.1f}, pitch={imu_values[1]*180/pi:.1f}, yaw={imu_values[2]*180/pi:.1f} deg")
+                print(f"  Logging:  {'ON' if logger.logging_enabled else 'OFF'} ({len(logger.data)} samples)\n")
+            # Data logging controls
+            elif key == ord('L') or key == ord('l'):
+                logger.toggle_logging()
+            elif key == ord('K') or key == ord('k'):
+                logger.save()
+            elif key == ord('P') or key == ord('p'):
+                print(logger.get_summary())
             key = keyboard.getKey()
 
         # Construct state vector
@@ -425,11 +696,16 @@ def main():
             past_pos, past_time, current_time
         )
 
-        # Compute MPC control
+        # Compute MPC control (with timing)
+        solve_start = pytime.perf_counter()
         u = mpc.compute_control(state)
+        solve_time_ms = (pytime.perf_counter() - solve_start) * 1000.0
 
         # Convert to motor commands
         motors = mpc.control_to_motors(u)
+
+        # Log data
+        logger.log(current_time, state, mpc.x_ref, u, motors, solve_time_ms)
 
         # Apply motor commands
         m1_motor.setVelocity(-motors[0])
