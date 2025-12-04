@@ -42,30 +42,28 @@ max_vel = 600.0 # motor speed limit
 # Input: [T, tau_x, tau_y, tau_z]
 def get_AB():
     A = np.zeros((12, 12))
-    
-    # Position derivatives
+
+    # position -> velocity
     A[0, 3] = 1.0   # x_dot = vx
     A[1, 4] = 1.0   # y_dot = vy
     A[2, 5] = 1.0   # z_dot = vz
-    
-    # Linearized at hover (T ≈ m*g)
-    # Horizontal accelerations from tilting thrust vector
-    A[3, 7] = -g    # vx_dot = -g * theta (pitch forward → accel forward)
-    A[4, 6] = g     # vy_dot = g * phi (roll right → accel right)
-    # A[5, ...] = 0 (vz controlled by thrust deviation)
-    
-    # Attitude kinematics
-    A[6, 9]  = 1.0  # roll_dot = p
+
+    # gravity coupling (small-angle)
+    A[3, 7] = g     # vx_dot =  g * pitch
+    A[4, 6] = -g    # vy_dot = -g * roll
+
+    # attitude -> angular rates
+    A[6, 9]  = 1.0  # roll_dot  = p
     A[7, 10] = 1.0  # pitch_dot = q
-    A[8, 11] = 1.0  # yaw_dot = r
-    
-    # Input matrix
+    A[8, 11] = 1.0  # yaw_dot   = r
+
+    # Input matrix (T, tau_x, tau_y, tau_z)
     B = np.zeros((12, 4))
-    B[5, 0]  = 1.0 / m   # vz_dot from T (deviation from m*g)
+    B[5, 0]  = 1.0 / m   # vz_dot from T
     B[9, 1]  = 1.0 / Ix  # p_dot from tau_x
     B[10, 2] = 1.0 / Iy  # q_dot from tau_y
     B[11, 3] = 1.0 / Iz  # r_dot from tau_z
-    
+
     return A, B
 
 # ================================
@@ -80,7 +78,7 @@ def compute_LQR(A, B):
         10.0, 10.0, 8.0   # p,q,r
     ])
 
-    R = np.diag([10.0, 50.0, 50.0, 100.0])  # Increase torque penalties
+    R = np.diag([10.0, 1.5, 1.5, 5.0])
 
     P = solve_continuous_are(A, B, Q, R)
     K = np.linalg.inv(R) @ B.T @ P

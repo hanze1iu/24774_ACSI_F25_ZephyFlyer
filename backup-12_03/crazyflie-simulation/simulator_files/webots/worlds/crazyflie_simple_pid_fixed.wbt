@@ -1,4 +1,4 @@
-#VRML_SIM R2025a utf8
+#VRML_SIM R2023a utf8
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
@@ -7,11 +7,20 @@ EXTERNPROTO "../protos/Crazyflie.proto"
 
 WorldInfo {
   basicTimeStep 8
-  FPS 30
+  contactProperties [
+    ContactProperties {
+      material1 "drone_material"
+      material2 "floor_material"
+      coulombFriction [
+        0.01
+      ]
+      bounce 0.1
+    }
+  ]
 }
 Viewpoint {
-  orientation -0.15015774849740857 0.950999073816921 0.27028394729533545 1
-  position -1.5 -1 2.52632494385983
+  orientation -0.2 0.9 0.4 1.2
+  position -1.0 -0.5 1.5
   follow "Crazyflie"
 }
 TexturedBackground {
@@ -19,10 +28,11 @@ TexturedBackground {
 TexturedBackgroundLight {
 }
 Floor {
+  size 10 10
+  contactMaterial "floor_material"
 }
 Crazyflie {
-  hidden linearVelocity_0 0 0 -0.0017541068519100805
-  translation 0 0 0.5022968689054337
-  controller "crazyflie_eso"
-  supervisor TRUE
+  translation 0 0 0.1
+  controller "crazyflie_simple_pid"
+  customData "contact_material:drone_material"
 }

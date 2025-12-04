@@ -6,6 +6,8 @@ from controller import Robot, Keyboard
 import numpy as np
 import sys
 sys.path.append('../../../../controllers_shared/python_based')
+from plotter import DataLogger
+logger = DataLogger("eso_flight")
 
 from pid_controller import pid_velocity_fixed_height_controller
 from eso import AttitudeESO
@@ -106,17 +108,66 @@ def body_velocity_from_global(vx_g, vy_g, yaw):
 # =========================
 PID_CF = pid_velocity_fixed_height_controller()
 T_cmd = m * g
-target = np.array([0.0, 0.0, 0.5])
+# target = np.array([0.0, 0.0, 0.5])
 
-Kp_pos = 0.5
-Kd_pos = 0.3
-VEL_LIMIT = 0.3
+Kp_pos   = 0.6
+Kd_pos   = 0.3
+VEL_LIMIT = 0.8   # and clamp vx_des, vy_des to this
 
 past_time = robot.getTime()
 past_pos = pos0.copy()
 
 PRINT_INTERVAL = 0.5
 last_print_time = 0.0
+
+# ===========================================================
+# CIRCULAR TRAJECTORY GENERATOR (VELOCITY-BASED, LIKE REAL CODE)
+# ===========================================================
+class CircleTrajectory:
+    def __init__(self, radius=0.5, z_height=0.5, period=10.0):
+        self.radius = radius
+        self.z = z_height
+        self.T = period
+        self.omega = 2 * np.pi / period
+        
+    def get(self, t):
+        """Return desired position and velocity at time t.
+        Circle passes THROUGH origin at t=0."""
+        r = self.radius
+        w = self.omega
+        
+        # Current angle (starts at -π so position begins at origin)
+        angle = w * t - np.pi
+        
+        # Position - circle centered at (r, 0) so it passes through origin
+        x = r + r * np.cos(angle)  # Center shifted right by r
+        y = r * np.sin(angle)
+        z = self.z
+        
+        # Velocity (tangent to circle)
+        vx = -r * w * np.sin(angle)
+        vy =  r * w * np.cos(angle)
+        vz = 0.0
+        
+        return np.array([x, y, z]), np.array([vx, vy, vz])
+
+trajectory = CircleTrajectory(
+    radius=0.5,
+    z_height=0.5,
+    period=15.0
+)
+
+TAKEOFF_Z = 0.5
+TAKEOFF_THRESHOLD = 0.45   # must reach this altitude before starting circle
+CIRCLE_STARTED = False
+CIRCLE_FINISHED = False
+
+ESO_READY = False
+ESO_INIT_TIME = 1.0     # seconds to wait before initializing ESO
+
+imu_buffer = []
+gps_buffer = []
+
 
 # =========================
 # MAIN LOOP
@@ -141,43 +192,136 @@ while robot.step(timestep) != -1:
     gps_velocity = (pos - past_pos) / dt
     past_pos = pos.copy()
 
-    # ESO update - NOW with IMU measurements!
-    y_meas = np.array([pos[0], pos[1], pos[2], roll, pitch, yaw])
-    z_hat = eso.step(y_meas, T_cmd, omega_body)
+    # ---------------------------------------------
+    # ESO Initialization Delay
+    # ---------------------------------------------
+    if not ESO_READY:
+        if t < ESO_INIT_TIME:
+            imu_buffer.append([roll, pitch, yaw])
+            gps_buffer.append(pos.tolist())
+            continue  # skip control until ESO warmed up
+        else:
+            # compute stable averages
+            avg_pos = np.mean(np.array(gps_buffer), axis=0)
+            avg_rpy = np.mean(np.array(imu_buffer), axis=0)
 
-    # Extract states
+            y_init = np.array([
+                avg_pos[0], avg_pos[1], avg_pos[2],
+                avg_rpy[0], avg_rpy[1], avg_rpy[2]
+            ])
+
+            eso.initialize_from_measurement(y_init)
+            ESO_READY = True
+            print(">>> ESO INITIALIZED AFTER DELAY. avg_pos=", avg_pos, " avg_rpy=", avg_rpy)
+
+    # ---------------------------------------------
+    # ESO UPDATE (ready or fallback, but always fill eso_* )
+    # ---------------------------------------------
+    if ESO_READY:
+        y_meas = np.array([pos[0], pos[1], pos[2], roll, pitch, yaw])
+        z_hat = eso.step(y_meas, T_cmd, omega_body)
+    else:
+        # fallback to IMU/GPS until ESO ready
+        z_hat = np.zeros(12)
+        z_hat[0:3] = pos
+        z_hat[3:6] = gps_velocity
+        z_hat[6:9] = [roll, pitch, yaw]
+
+    # Extract states (common interface)
     eso_p = z_hat[0:3]
     eso_v = z_hat[3:6]
-    eso_att = z_hat[6:9]    # Estimated attitude!
+    eso_att = z_hat[6:9]
     eso_d_f = z_hat[9:12]
-    
     eso_roll, eso_pitch, eso_yaw = eso_att
 
-    # Choose control source
+    # ---------------------------------------------
+    # Choose control source (now ALWAYS defines ctrl_pos, etc.)
+    # ---------------------------------------------
     if USE_ESO_FOR_CONTROL:
         ctrl_pos = eso_p
         ctrl_vx_world, ctrl_vy_world, ctrl_vz = eso_v
-        ctrl_roll = eso_roll      # Use ESO attitude!
+        ctrl_roll = eso_roll
         ctrl_pitch = eso_pitch
         ctrl_yaw = eso_yaw
-        source_label = "ESO"
+        source_label = "ESO" if ESO_READY else "ESO (fallback from GPS)"
     else:
         ctrl_pos = pos
         ctrl_vx_world, ctrl_vy_world, ctrl_vz = gps_velocity
-        ctrl_roll = roll          # Use IMU attitude
+        ctrl_roll = roll
         ctrl_pitch = pitch
         ctrl_yaw = yaw
         source_label = "GPS+IMU"
 
-    # Position control
-    pos_err = target - ctrl_pos
-    vx_des = Kp_pos * pos_err[0] + Kd_pos * (-ctrl_vx_world)
-    vy_des = Kp_pos * pos_err[1] + Kd_pos * (-ctrl_vy_world)
-    vz_des = Kp_pos * pos_err[2] + Kd_pos * (-ctrl_vz)
+    # ===========================================================
+    # TRAJECTORY MANAGEMENT (LASSO PATTERN)
+    # ===========================================================
 
+    TAKEOFF_TIME = 3.0
+    TAKEOFF_Z = 0.5
+    ORIGIN = np.array([0.0, 0.0])
+    CIRCLE_CENTER = np.array([0.5, 0.0])  # Circle center offset from origin
+
+    if not CIRCLE_STARTED:
+        # Smooth takeoff ramp at origin
+        elapsed_takeoff = t - ESO_INIT_TIME
+        z_cmd = TAKEOFF_Z * np.clip(elapsed_takeoff / TAKEOFF_TIME, 0.0, 1.0)
+        
+        target = np.array([0.0, 0.0, z_cmd])
+        vel_ff = np.zeros(3)
+        
+        # Check if fully reached takeoff point
+        if elapsed_takeoff >= TAKEOFF_TIME and abs(ctrl_pos[2] - TAKEOFF_Z) < 0.05:
+            print(f">>> TAKEOFF COMPLETE at t={t:.2f}s — STARTING CIRCLE")
+            CIRCLE_STARTED = True
+            circle_start_time = t
+
+    # ------------------ CIRCLE FLIGHT ----------------------
+    elif CIRCLE_STARTED and not CIRCLE_FINISHED:
+        rel_time = t - circle_start_time
+        
+        if rel_time <= trajectory.T:
+            target, vel_ff = trajectory.get(rel_time)
+        else:
+            print(f">>> CIRCLE COMPLETE at t={t:.2f}s — RETURNING TO ORIGIN FOR LANDING")
+            CIRCLE_FINISHED = True
+            landing_start_time = t
+
+    # ------------------ LANDING SEQUENCE -------------------
+    elif CIRCLE_FINISHED:
+        # First return horizontally to origin
+        xy_err = ORIGIN - ctrl_pos[:2]
+        xy_dist = np.linalg.norm(xy_err)
+        
+        if xy_dist > 0.05:
+            # Move back to origin (maintain current altitude)
+            target = np.array([ORIGIN[0], ORIGIN[1], ctrl_pos[2]])
+            vel_ff = np.zeros(3)
+        
+        else:
+            # Once at origin → descend smoothly
+            descend_rate = -0.10   # m/s
+            final_z = 0.0
+            
+            z_cmd = max(final_z, ctrl_pos[2] + descend_rate * dt)
+            target = np.array([0.0, 0.0, z_cmd])
+            vel_ff = np.zeros(3)
+            
+            if ctrl_pos[2] <= 0.10:  # Within 10cm of ground
+                print(">>> LANDED — SHUTTING DOWN MOTORS")
+                break
+
+
+
+    # Position control with feedforward
+    pos_err = target - ctrl_pos
+
+    vx_des = Kp_pos * pos_err[0] + Kd_pos * (-ctrl_vx_world) + vel_ff[0]
+    vy_des = Kp_pos * pos_err[1] + Kd_pos * (-ctrl_vy_world) + vel_ff[1]
+    vz_des = Kp_pos * pos_err[2] + Kd_pos * (-ctrl_vz)       + vel_ff[2]
+
+    # === Clamp lateral velocity commands ===
     vx_des = np.clip(vx_des, -VEL_LIMIT, VEL_LIMIT)
     vy_des = np.clip(vy_des, -VEL_LIMIT, VEL_LIMIT)
-    vz_des = np.clip(vz_des, -VEL_LIMIT, VEL_LIMIT)
 
     # Transform to body frame
     v_body_x_des, v_body_y_des = body_velocity_from_global(vx_des, vy_des, ctrl_yaw)
@@ -215,6 +359,15 @@ while robot.step(timestep) != -1:
     motors[2].setVelocity(-motor_power[2])
     motors[3].setVelocity( motor_power[3])
 
+    # Log data
+    logger.log(
+        t,
+        pos,
+        eso_p, eso_v, eso_att,
+        [roll, pitch, yaw],
+        target,
+        motor_power
+    )
     # Prints
     if (t - last_print_time) >= PRINT_INTERVAL:
         last_print_time = t
@@ -226,3 +379,7 @@ while robot.step(timestep) != -1:
         print(f"Attitude: IMU=({roll*180/np.pi:+.1f}°,{pitch*180/np.pi:+.1f}°,{yaw*180/np.pi:+.1f}°), ESO=({eso_roll*180/np.pi:+.1f}°,{eso_pitch*180/np.pi:+.1f}°,{eso_yaw*180/np.pi:+.1f}°)")
         print(f"Force Dist: ({eso_d_f[0]:+.4f},{eso_d_f[1]:+.4f},{eso_d_f[2]:+.4f})N")
         print(f"Motors: [{motor_power[0]:.1f},{motor_power[1]:.1f},{motor_power[2]:.1f},{motor_power[3]:.1f}]")
+
+# When loop ends (simulation reset or closed), close the log
+logger.close()
+print("Log file closed.")
